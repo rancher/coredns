@@ -73,6 +73,17 @@ func (e *Etcd) IsNameError(err error) bool {
 func (e *Etcd) Records(ctx context.Context, state request.Request, exact bool) ([]msg.Service, error) {
 	name := state.Name()
 
+	// No need to lookup the domain which is like zone name
+	// for example:
+	//  name: lb.rancher.cloud.
+	//  zones: [lb.rancher.cloud]
+	// "lb.rancher.cloud." shold not lookup any keys in etcd
+	for _, zone := range e.Zones {
+		if strings.HasPrefix(name, zone) {
+			return nil, nil
+		}
+	}
+
 	if e.WildcardBound > 0 {
 		temp := dns.SplitDomainName(name)
 		if int8(len(temp)) > e.WildcardBound {
