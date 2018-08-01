@@ -72,6 +72,7 @@ func (e *Etcd) IsNameError(err error) bool {
 // name. This is used when find matches when completing SRV lookups for instance.
 func (e *Etcd) Records(ctx context.Context, state request.Request, exact bool) ([]msg.Service, error) {
 	name := state.Name()
+	qType := state.QType()
 
 	// No need to lookup the domain which is like zone name
 	// for example:
@@ -84,11 +85,28 @@ func (e *Etcd) Records(ctx context.Context, state request.Request, exact bool) (
 		}
 	}
 
-	if e.WildcardBound > 0 {
+	if e.WildcardBound > 0 && qType != dns.TypeTXT {
 		temp := dns.SplitDomainName(name)
 		if int8(len(temp)) > e.WildcardBound {
 			start := int8(len(temp)) - e.WildcardBound
 			name = fmt.Sprintf("*.%s", strings.Join(temp[start:], "."))
+		}
+	}
+
+	if qType == dns.TypeTXT && strings.Contains(name, "_acme-challenge") {
+		// Only for ACME DNS challenge (dns-01) txt record, such as _acme-challenge.xx.xx
+		// need add _txt level after the root level
+		// for example:
+		//   name: _acme-challenge.a1.lb.rancher.cloud.
+		//   reverse: cloud.rancher.lb.a1._acme-challenge._txt
+		//   path: /skydns/_txt/_acme-challenge/a1/lb/rancher/cloud
+		temp := dns.SplitDomainName(name)
+		for index, value := range temp {
+			if index == 0 {
+				name = value + "._txt"
+				continue
+			}
+			name = value + "." + name
 		}
 	}
 
