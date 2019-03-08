@@ -69,6 +69,9 @@ func (e *Etcd) IsNameError(err error) bool {
 func (e *Etcd) Records(state request.Request, exact bool) ([]msg.Service, error) {
 	name := state.Name()
 	qType := state.QType()
+	subPath := ""
+	star := false
+	hasSubDomain := false
 
 	// No need to lookup the domain which is like zone name
 	// for example:
@@ -81,10 +84,13 @@ func (e *Etcd) Records(state request.Request, exact bool) ([]msg.Service, error)
 		}
 	}
 
-	if e.WildcardBound > 0 && qType != dns.TypeTXT {
-		temp := dns.SplitDomainName(name)
-		if int8(len(temp)) > e.WildcardBound {
-			start := int8(len(temp)) - e.WildcardBound
+	temp := dns.SplitDomainName(name)
+	start := int8(len(temp)) - e.WildcardBound
+	if e.WildcardBound > 0 && qType != dns.TypeTXT && start > 0 {
+		subPath = e.hasSubDomains(name)
+		if subPath != "" && !strings.Contains(name, "*") {
+			hasSubDomain = true
+		} else {
 			name = fmt.Sprintf("*.%s", strings.Join(temp[start:], "."))
 		}
 	}
@@ -106,12 +112,22 @@ func (e *Etcd) Records(state request.Request, exact bool) ([]msg.Service, error)
 		}
 	}
 
-	path, star := msg.PathWithWildcard(name, e.PathPrefix)
+	var path string
+	var segments []string
+
+	if !hasSubDomain {
+		path, star = msg.PathWithWildcard(name, e.PathPrefix)
+		segments = strings.Split(msg.Path(name, e.PathPrefix), "/")
+	} else {
+		// Converts the current sub-domain to the path of the etcd
+		path = msg.PathSubDomain(subPath, e.WildcardBound, dns.SplitDomainName(name))
+		segments = strings.Split(path, "/")
+	}
+
 	r, err := e.get(path, true)
 	if err != nil {
 		return nil, err
 	}
-	segments := strings.Split(msg.Path(name, e.PathPrefix), "/")
 	switch {
 	case exact && r.Node.Dir:
 		return nil, nil
@@ -188,6 +204,18 @@ Nodes:
 		sx = append(sx, *serv)
 	}
 	return sx, nil
+}
+
+func (e *Etcd) hasSubDomains(name string) string {
+	p := msg.RootPathSubDomain(name, e.WildcardBound, e.PathPrefix)
+	resp, err := e.get(p, true)
+	if err != nil {
+		return ""
+	}
+	if len(resp.Node.Nodes) > 0 {
+		return p
+	}
+	return ""
 }
 
 // TTL returns the smaller of the etcd TTL and the service's
