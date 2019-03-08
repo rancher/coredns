@@ -126,6 +126,19 @@ func (e *Etcd) Records(state request.Request, exact bool) ([]msg.Service, error)
 
 	r, err := e.get(path, true)
 	if err != nil {
+		// If subdomain doesn't match any of the record, return the record of the root domain
+		if hasSubDomain && etcdc.IsKeyNotFound(err) {
+			temp := dns.SplitDomainName(name)
+			upper := temp[(int8(len(temp)) - e.WildcardBound):]
+			name = fmt.Sprintf("*.%s", strings.Join(upper, "."))
+			path, star = msg.PathWithWildcard(name, e.PathPrefix)
+			segments = strings.Split(msg.Path(name, e.PathPrefix), "/")
+			resp, err := e.get(path, true)
+			if err != nil {
+				return nil, err
+			}
+			return e.loopNodes(resp.Node.Nodes, segments, star, nil)
+		}
 		return nil, err
 	}
 	switch {
