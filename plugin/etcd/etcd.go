@@ -69,6 +69,11 @@ func (e *Etcd) IsNameError(err error) bool {
 func (e *Etcd) Records(state request.Request, exact bool) ([]msg.Service, error) {
 	name := state.Name()
 	qType := state.QType()
+	star := false
+	hasSubDomain := false
+	subPath := ""
+
+	temp := dns.SplitDomainName(name)
 
 	// No need to lookup the domain which is like zone name
 	// for example:
@@ -81,9 +86,12 @@ func (e *Etcd) Records(state request.Request, exact bool) ([]msg.Service, error)
 		}
 	}
 
-	if e.WildcardBound > 0 && qType != dns.TypeTXT {
-		temp := dns.SplitDomainName(name)
-		if int8(len(temp)) > e.WildcardBound {
+	if e.WildcardBound > 0 && qType != dns.TypeTXT && int8(len(temp)) > e.WildcardBound {
+		// Determines whether the current domain name contains subdomains.
+		subPath = e.hasSubDomains(temp)
+		if subPath != "" {
+			hasSubDomain = true
+		} else {
 			start := int8(len(temp)) - e.WildcardBound
 			name = fmt.Sprintf("*.%s", strings.Join(temp[start:], "."))
 		}
@@ -96,7 +104,6 @@ func (e *Etcd) Records(state request.Request, exact bool) ([]msg.Service, error)
 		//   name: _acme-challenge.a1.lb.rancher.cloud.
 		//   reverse: cloud.rancher.lb.a1._acme-challenge._txt
 		//   path: /skydns/_txt/_acme-challenge/a1/lb/rancher/cloud
-		temp := dns.SplitDomainName(name)
 		for index, value := range temp {
 			if index == 0 {
 				name = value + "._txt"
@@ -106,12 +113,23 @@ func (e *Etcd) Records(state request.Request, exact bool) ([]msg.Service, error)
 		}
 	}
 
-	path, star := msg.PathWithWildcard(name, e.PathPrefix)
+	var path string
+	var segments []string
+
+	if !hasSubDomain {
+		path, star = msg.PathWithWildcard(name, e.PathPrefix)
+		segments = strings.Split(msg.Path(name, e.PathPrefix), "/")
+	} else {
+		// Converts the current sub-domain to the path of the etcd
+		path = msg.PathSubDomain(subPath, e.WildcardBound, temp)
+		segments = strings.Split(path, "/")
+	}
+
 	r, err := e.get(path, true)
 	if err != nil {
 		return nil, err
 	}
-	segments := strings.Split(msg.Path(name, e.PathPrefix), "/")
+
 	switch {
 	case exact && r.Node.Dir:
 		return nil, nil
@@ -188,6 +206,18 @@ Nodes:
 		sx = append(sx, *serv)
 	}
 	return sx, nil
+}
+
+func (e *Etcd) hasSubDomains(s []string) string {
+	p := msg.RootPathSubDomain(s, e.WildcardBound, e.PathPrefix)
+	resp, err := e.get(p, true)
+	if err != nil {
+		return ""
+	}
+	if len(resp.Node.Nodes) > 0 {
+		return p
+	}
+	return ""
 }
 
 // TTL returns the smaller of the etcd TTL and the service's

@@ -1,6 +1,7 @@
 package msg
 
 import (
+	"fmt"
 	"path"
 	"strings"
 
@@ -45,4 +46,31 @@ func PathWithWildcard(s, prefix string) (string, bool) {
 		}
 	}
 	return path.Join(append([]string{"/" + prefix + "/"}, l...)...), false
+}
+
+// RootPathSubDomain is used to get the upper level etcd path of the current sub-domain.
+// for example:
+//    name: sub1.a1.lb.rancher.cloud.
+//    sub-domain-path: /skydns/_sub-domain/a1/lb/rancher/cloud/sub1
+//    upper-level-path(root): /skydns/_sub-domain/a1/lb/rancher/cloud
+func RootPathSubDomain(s []string, wildcardBound int8, prefix string) string {
+	s = s[(int8(len(s)) - wildcardBound):]
+	for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+		s[i], s[j] = s[j], s[i]
+	}
+	path := strings.Join(s, ".")
+	return Path(path, prefix+"/_sub-domain")
+}
+
+// PathSubDomain is used to get the real path which stored in etcd.
+// for example:
+//    name: sub1.a1.lb.rancher.cloud.
+//    root(upper-level-path): /skydns/_sub-domain/a1/lb/rancher/cloud/
+//    sub-domain-path: /skydns/_sub-domain/a1/lb/rancher/cloud/sub1
+func PathSubDomain(root string, wildcardBound int8, s []string) string {
+	slice := s[:(int8(len(s)) - wildcardBound)]
+	for i, j := 0, len(slice)-1; i < j; i, j = i+1, j-1 {
+		slice[i], slice[j] = slice[j], slice[i]
+	}
+	return fmt.Sprintf("%s/%s", root, strings.Join(slice, "/"))
 }
