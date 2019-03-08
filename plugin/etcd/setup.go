@@ -10,7 +10,7 @@ import (
 	mwtls "github.com/coredns/coredns/plugin/pkg/tls"
 	"github.com/coredns/coredns/plugin/pkg/upstream"
 
-	etcdcv3 "github.com/coreos/etcd/clientv3"
+	etcdc "github.com/coreos/etcd/client"
 	"github.com/mholt/caddy"
 )
 
@@ -124,20 +124,20 @@ func etcdParse(c *caddy.Controller) (*Etcd, error) {
 	return &Etcd{}, nil
 }
 
-func newEtcdClient(endpoints []string, cc *tls.Config, username, password string) (*etcdcv3.Client, error) {
-	etcdCfg := etcdcv3.Config{
+func newEtcdClient(endpoints []string, cc *tls.Config, username, password string) (etcdc.KeysAPI, error) {
+	etcdCfg := etcdc.Config{
 		Endpoints: endpoints,
-		TLS:       cc,
+		Transport: mwtls.NewHTTPSTransport(cc),
 	}
 	if username != "" && password != "" {
 		etcdCfg.Username = username
 		etcdCfg.Password = password
 	}
-	cli, err := etcdcv3.New(etcdCfg)
+	cli, err := etcdc.New(etcdCfg)
 	if err != nil {
 		return nil, err
 	}
-	return cli, nil
+	return etcdc.NewKeysAPI(cli), nil
 }
 
 const defaultEndpoint = "http://localhost:2379"
