@@ -15,8 +15,7 @@ import (
 	"github.com/coredns/coredns/request"
 
 	"github.com/coredns/coredns/plugin/pkg/upstream"
-	etcdcv3 "github.com/coreos/etcd/clientv3"
-	"github.com/coreos/etcd/mvcc/mvccpb"
+	etcdc "github.com/coreos/etcd/client"
 	"github.com/miekg/dns"
 )
 
@@ -35,7 +34,7 @@ type Etcd struct {
 	Zones      []string
 	PathPrefix string
 	Upstream   *upstream.Upstream
-	Client     *etcdcv3.Client
+	Client     etcdc.KeysAPI
 
 	endpoints []string // Stored here as well, to aid in testing.
 
@@ -73,6 +72,9 @@ func (e *Etcd) IsNameError(err error) bool {
 func (e *Etcd) Records(ctx context.Context, state request.Request, exact bool) ([]msg.Service, error) {
 	name := state.Name()
 	qType := state.QType()
+	subPath := ""
+	star := false
+	hasSubDomain := false
 
 	// No need to lookup the domain which is like zone name
 	// for example:
@@ -85,10 +87,13 @@ func (e *Etcd) Records(ctx context.Context, state request.Request, exact bool) (
 		}
 	}
 
-	if e.WildcardBound > 0 && qType != dns.TypeTXT {
-		temp := dns.SplitDomainName(name)
-		if int8(len(temp)) > e.WildcardBound {
-			start := int8(len(temp)) - e.WildcardBound
+	temp := dns.SplitDomainName(name)
+	start := int8(len(temp)) - e.WildcardBound
+	if e.WildcardBound > 0 && qType != dns.TypeTXT && start > 0 {
+		subPath = e.hasSubDomains(ctx, name)
+		if subPath != "" && !strings.Contains(name, "*") {
+			hasSubDomain = true
+		} else {
 			name = fmt.Sprintf("*.%s", strings.Join(temp[start:], "."))
 		}
 	}
@@ -110,56 +115,80 @@ func (e *Etcd) Records(ctx context.Context, state request.Request, exact bool) (
 		}
 	}
 
-	path, star := msg.PathWithWildcard(name, e.PathPrefix)
-	r, err := e.get(ctx, path, !exact)
-	if err != nil {
-		return nil, err
-	}
-	segments := strings.Split(msg.Path(name, e.PathPrefix), "/")
-	return e.loopNodes(r.Kvs, segments, star, state.QType())
-}
+	var path string
+	var segments []string
 
-func (e *Etcd) get(ctx context.Context, path string, recursive bool) (*etcdcv3.GetResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, etcdTimeout)
-	defer cancel()
-	if recursive == true {
-		if !strings.HasSuffix(path, "/") {
-			path = path + "/"
-		}
-		r, err := e.Client.Get(ctx, path, etcdcv3.WithPrefix())
-		if err != nil {
-			return nil, err
-		}
-		if r.Count == 0 {
-			path = strings.TrimSuffix(path, "/")
-			r, err = e.Client.Get(ctx, path)
+	if !hasSubDomain {
+		path, star = msg.PathWithWildcard(name, e.PathPrefix)
+		segments = strings.Split(msg.Path(name, e.PathPrefix), "/")
+	} else {
+		// Converts the current sub-domain to the path of the etcd
+		path = msg.PathSubDomain(subPath, e.WildcardBound, dns.SplitDomainName(name))
+		segments = strings.Split(path, "/")
+	}
+
+	r, err := e.get(ctx, path, true)
+	if err != nil {
+		// If subdomain doesn't match any of the record, return the record of the root domain
+		if hasSubDomain && etcdc.IsKeyNotFound(err) {
+			temp := dns.SplitDomainName(name)
+			upper := temp[(int8(len(temp)) - e.WildcardBound):]
+			name = fmt.Sprintf("*.%s", strings.Join(upper, "."))
+			path, star = msg.PathWithWildcard(name, e.PathPrefix)
+			segments = strings.Split(msg.Path(name, e.PathPrefix), "/")
+			resp, err := e.get(ctx, path, true)
 			if err != nil {
 				return nil, err
 			}
-			if r.Count == 0 {
-				return nil, errKeyNotFound
-			}
+			return e.loopNodes(resp.Node.Nodes, segments, star, nil)
 		}
-		return r, nil
-	}
-
-	r, err := e.Client.Get(ctx, path)
-	if err != nil {
 		return nil, err
 	}
-	if r.Count == 0 {
-		return nil, errKeyNotFound
+	switch {
+	case exact && r.Node.Dir:
+		return nil, nil
+	case r.Node.Dir:
+		return e.loopNodes(r.Node.Nodes, segments, star, nil)
+	default:
+		return e.loopNodes([]*etcdc.Node{r.Node}, segments, false, nil)
+	}
+}
+
+// get is a wrapper for client.Get
+func (e *Etcd) get(ctx context.Context, path string, recursive bool) (*etcdc.Response, error) {
+	ctx, cancel := context.WithTimeout(ctx, etcdTimeout)
+	defer cancel()
+	r, err := e.Client.Get(ctx, path, &etcdc.GetOptions{Sort: false, Recursive: recursive})
+	if err != nil {
+		return nil, err
 	}
 	return r, nil
 }
 
-func (e *Etcd) loopNodes(kv []*mvccpb.KeyValue, nameParts []string, star bool, qType uint16) (sx []msg.Service, err error) {
-	bx := make(map[msg.Service]struct{})
+// skydns/local/skydns/east/staging/web
+// skydns/local/skydns/west/production/web
+//
+// skydns/local/skydns/*/*/web
+// skydns/local/skydns/*/web
+
+// loopNodes recursively loops through the nodes and returns all the values. The nodes' keyname
+// will be match against any wildcards when star is true.
+func (e *Etcd) loopNodes(ns []*etcdc.Node, nameParts []string, star bool, bx map[msg.Service]bool) (sx []msg.Service, err error) {
+	if bx == nil {
+		bx = make(map[msg.Service]bool)
+	}
 Nodes:
-	for _, n := range kv {
+	for _, n := range ns {
+		if n.Dir {
+			nodes, err := e.loopNodes(n.Nodes, nameParts, star, bx)
+			if err != nil {
+				return nil, err
+			}
+			sx = append(sx, nodes...)
+			continue
+		}
 		if star {
-			s := string(n.Key)
-			keyParts := strings.Split(s, "/")
+			keyParts := strings.Split(n.Key, "/")
 			for i, n := range nameParts {
 				if i > len(keyParts)-1 {
 					// name is longer than key
@@ -174,31 +203,41 @@ Nodes:
 			}
 		}
 		serv := new(msg.Service)
-		if err := json.Unmarshal(n.Value, serv); err != nil {
+		if err := json.Unmarshal([]byte(n.Value), serv); err != nil {
 			return nil, fmt.Errorf("%s: %s", n.Key, err.Error())
 		}
-		serv.Key = string(n.Key)
-		if _, ok := bx[*serv]; ok {
+		b := msg.Service{Host: serv.Host, Port: serv.Port, Priority: serv.Priority, Weight: serv.Weight, Text: serv.Text, Key: n.Key}
+		if _, ok := bx[b]; ok {
 			continue
 		}
-		bx[*serv] = struct{}{}
+		bx[b] = true
 
+		serv.Key = n.Key
 		serv.TTL = e.TTL(n, serv)
 		if serv.Priority == 0 {
 			serv.Priority = priority
 		}
-
-		if shouldInclude(serv, qType) {
-			sx = append(sx, *serv)
-		}
+		sx = append(sx, *serv)
 	}
 	return sx, nil
 }
 
+func (e *Etcd) hasSubDomains(ctx context.Context, name string) string {
+	p := msg.RootPathSubDomain(name, e.WildcardBound, e.PathPrefix)
+	resp, err := e.get(ctx, p, true)
+	if err != nil {
+		return ""
+	}
+	if len(resp.Node.Nodes) > 0 {
+		return p
+	}
+	return ""
+}
+
 // TTL returns the smaller of the etcd TTL and the service's
 // TTL. If neither of these are set (have a zero value), a default is used.
-func (e *Etcd) TTL(kv *mvccpb.KeyValue, serv *msg.Service) uint32 {
-	etcdTTL := uint32(kv.Lease)
+func (e *Etcd) TTL(node *etcdc.Node, serv *msg.Service) uint32 {
+	etcdTTL := uint32(node.TTL)
 
 	if etcdTTL == 0 && serv.TTL == 0 {
 		return ttl
