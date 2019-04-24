@@ -36,4 +36,4 @@ steps:
     - tag
     ref:
       include:
-      - "refs/tags/*rancher"
+      - "refs/tags/*rancher*"
