@@ -28,11 +28,12 @@ steps:
     password:
       from_secret: docker_password
     repo: rancher/coredns
-    tag: "${DRONE_COMMIT}-rancher-amd64"
+    tag: "${DRONE_TAG}-amd64"
     username:
       from_secret: docker_username
   when:
     event:
-    - push
-    branch:
-    - rancher-v1.5.0
+    - tag
+    ref:
+      include:
+      - "refs/tags/*rancher"
