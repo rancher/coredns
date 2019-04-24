@@ -1,0 +1,38 @@
+---
+kind: pipeline
+name: default
+
+platform:
+  os: linux
+  arch: amd64
+
+steps:
+- name: sed
+  image: hairyhenderson/sed
+  commands:
+  - "sed -i '/# log:log/a rrl:github.com/rancher/rrl/plugins/rrl' plugin.cfg"
+
+- name: build
+  image: golang:1.12
+  commands:
+  - go generate
+  - rm -rf /go/pkg/mod/github.com/coreos/etcd@v3.3.11+incompatible/client/keys.generated.go
+  - go build
+
+- name: docker-publish
+  image: plugins/docker
+  settings:
+    context: .
+    custom_dns: 1.1.1.1
+    dockerfile: Dockerfile
+    password:
+      from_secret: docker_password
+    repo: rancher/coredns
+    tag: "${DRONE_COMMIT}-rancher-amd64"
+    username:
+      from_secret: docker_username
+  when:
+    event:
+    - push
+    branch:
+    - rancher-v1.5.0
