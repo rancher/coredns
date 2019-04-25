@@ -17,7 +17,7 @@ steps:
   commands:
   - go generate
   - rm -rf /go/pkg/mod/github.com/coreos/etcd@v3.3.11+incompatible/client/keys.generated.go
-  - go build
+  - GO111MODULE=on CGO_ENABLED=0 go build -v -ldflags="-s -w -X github.com/rancher/coredns/coremain.GitCommit=$$(git describe --dirty --always)"
 
 - name: docker-publish
   image: plugins/docker
@@ -36,4 +36,4 @@ steps:
     - tag
     ref:
       include:
-      - "refs/tags/*rancher"
+      - "refs/tags/*rancher*"
