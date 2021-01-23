@@ -1,5 +1,7 @@
 FROM alpine:latest
 
+RUN apk --no-cache add bash
+
 # Only need ca-certificates & openssl if want to use DNS over TLS (RFC 7858).
 RUN apk --no-cache add bind-tools ca-certificates openssl && update-ca-certificates
 
